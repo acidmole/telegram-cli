@@ -5,13 +5,16 @@ package telegram
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/message"
+	"github.com/gotd/td/telegram/message/styling"
 	"github.com/gotd/td/telegram/updates"
+	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
 )
 
@@ -158,6 +161,27 @@ func (c *Client) Send(ctx context.Context, chat Chat, text string, replyTo int) 
 	return err
 }
 
+// imageExts are the formats Telegram accepts as photos.
+var imageExts = map[string]bool{".jpg": true, ".jpeg": true, ".png": true, ".webp": true}
+
+// SendImage uploads the image at path and posts it as a photo with an
+// optional caption, as a reply when replyTo is not 0.
+func (c *Client) SendImage(ctx context.Context, chat Chat, path, caption string, replyTo int) error {
+	if !imageExts[strings.ToLower(filepath.Ext(path))] {
+		return fmt.Errorf("%s: not a jpg, png or webp image", filepath.Base(path))
+	}
+	file, err := uploader.NewUploader(c.api).FromPath(ctx, path)
+	if err != nil {
+		return err
+	}
+	b := &c.sender.To(chat.Peer).Builder
+	if replyTo != 0 {
+		b = b.Reply(replyTo)
+	}
+	_, err = b.Media(ctx, message.UploadedPhoto(file, styling.Plain(caption)))
+	return err
+}
+
 // MarkRead marks the chat read up to and including message maxID, on every
 // device of the account.
 func (c *Client) MarkRead(ctx context.Context, chat Chat, maxID int) error {
@@ -273,11 +297,25 @@ func (c *Client) convert(mc tg.MessageClass) (Message, bool) {
 }
 
 func mediaLabel(media tg.MessageMediaClass) string {
-	switch media.(type) {
+	switch media := media.(type) {
 	case *tg.MessageMediaPhoto:
-		return "[photo]"
+		// Telegram keeps no file name for photos.
+		return "[img: photo.jpg]"
 	case *tg.MessageMediaDocument:
-		return "[file]"
+		doc, ok := media.Document.(*tg.Document)
+		if !ok {
+			return "[file]"
+		}
+		name := "file"
+		for _, a := range doc.Attributes {
+			if f, ok := a.(*tg.DocumentAttributeFilename); ok {
+				name = f.FileName
+			}
+		}
+		if strings.HasPrefix(doc.MimeType, "image/") {
+			return "[img: " + ShortName(name) + "]"
+		}
+		return "[file: " + ShortName(name) + "]"
 	case *tg.MessageMediaGeo, *tg.MessageMediaGeoLive, *tg.MessageMediaVenue:
 		return "[location]"
 	case *tg.MessageMediaContact:
@@ -289,6 +327,22 @@ func mediaLabel(media tg.MessageMediaClass) string {
 	default:
 		return "[media]"
 	}
+}
+
+// ShortName fits a file name in 14 characters, keeping its extension:
+// "holiday-beach-2026.jpg" becomes "holiday-b~.jpg".
+func ShortName(name string) string {
+	const limit = 14
+	r := []rune(name)
+	if len(r) <= limit {
+		return name
+	}
+	ext := []rune(filepath.Ext(name))
+	if len(ext) >= limit-1 {
+		return string(r[:limit-1]) + "~"
+	}
+	keep := limit - len(ext) - 1
+	return string(r[:keep]) + "~" + string(ext)
 }
 
 func peerKey(p tg.PeerClass) string {

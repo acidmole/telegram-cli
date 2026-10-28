@@ -6,6 +6,8 @@ import (
 	"context"
 	"fmt"
 	"hash/fnv"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -149,6 +151,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.receive(telegram.Message(msg)), m.waitForUpdate())
 
 	case sentMsg:
+		if strings.HasPrefix(m.status, "Uploading ") {
+			m.status = "Sent."
+		}
 		return m, m.loadHistory(msg.chat)
 
 	case errMsg:
@@ -246,6 +251,11 @@ func (m Model) handleInputKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.input.Reset()
 		m.replyTo = nil
+		if rest, ok := strings.CutPrefix(text, "/img "); ok {
+			path, caption, _ := strings.Cut(strings.TrimSpace(rest), " ")
+			m.status = "Uploading " + telegram.ShortName(filepath.Base(path)) + "..."
+			return m, m.sendImage(*m.open, expandHome(path), strings.TrimSpace(caption), replyTo)
+		}
 		return m, m.send(*m.open, text, replyTo)
 	}
 	var cmd tea.Cmd
@@ -406,7 +416,7 @@ func (m Model) View() string {
 
 	list := listStyle.Width(listWidth).Height(m.view.Height + 4).Render(m.renderList(m.view.Height + 4))
 
-	hint := dim.Render("Ctrl+R: reply to a message")
+	hint := dim.Render(truncate("Ctrl+R: reply to a message  /img <path> [caption]: attach an image", m.view.Width))
 	switch {
 	case m.focus == focusPick:
 		hint = dim.Render("Up/Down: choose  Enter: reply  Esc: cancel")
@@ -518,6 +528,15 @@ func (m Model) send(chat telegram.Chat, text string, replyTo int) tea.Cmd {
 	}
 }
 
+func (m Model) sendImage(chat telegram.Chat, path, caption string, replyTo int) tea.Cmd {
+	return func() tea.Msg {
+		if err := m.client.SendImage(m.ctx, chat, path, caption, replyTo); err != nil {
+			return errMsg{err}
+		}
+		return sentMsg{chat}
+	}
+}
+
 func (m Model) waitForUpdate() tea.Cmd {
 	return func() tea.Msg {
 		select {
@@ -527,6 +546,16 @@ func (m Model) waitForUpdate() tea.Cmd {
 			return nil
 		}
 	}
+}
+
+// expandHome turns a leading ~/ into the home directory, as a shell would.
+func expandHome(path string) string {
+	if rest, ok := strings.CutPrefix(path, "~/"); ok {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, rest)
+		}
+	}
+	return path
 }
 
 func senderName(msg telegram.Message) string {
