@@ -94,9 +94,13 @@ type Model struct {
 	typing  map[string]map[string]typer
 	ticking bool
 
-	focus   focus
-	pick    int
-	replyTo *telegram.Message
+	focus focus
+	// help shows the key and command reference in the message pane;
+	// helpOffset is the scroll position to return to.
+	help       bool
+	helpOffset int
+	pick       int
+	replyTo    *telegram.Message
 	// attached is a pasted image that goes out with the next Enter.
 	attached *attachment
 
@@ -143,7 +147,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if n := len(m.visible()); m.cursor >= n {
 			m.cursor = max(n-1, 0)
 		}
-		m.status = fmt.Sprintf("%d chats. Enter: open  /: search  Tab: switch pane  Esc: back  Ctrl+C: quit", len(m.chats))
+		m.status = fmt.Sprintf("%d chats. Ctrl+H: help", len(m.chats))
 		return m, nil
 
 	case historyMsg:
@@ -211,6 +215,19 @@ func (m Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch k.String() {
 	case "ctrl+c":
 		return m, tea.Quit
+	case "ctrl+h":
+		if !m.help {
+			m.openHelp()
+			return m, nil
+		}
+	}
+	// Any key closes the help, and does nothing else.
+	if m.help {
+		m.closeHelp()
+		return m, nil
+	}
+
+	switch k.String() {
 	case "tab":
 		if m.open != nil && m.focus != focusPick {
 			m.setFocus(focusList + focusInput - m.focus)
@@ -386,6 +403,13 @@ func (m Model) handleInputKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.open == nil || (text == "" && m.attached == nil) {
 			return m, nil
 		}
+		if strings.HasPrefix(text, "/") && !strings.HasPrefix(text, "//") {
+			return m.runCommand(text)
+		}
+		// "//" sends text that starts with a slash, such as a bot command.
+		if strings.HasPrefix(text, "//") {
+			text = text[1:]
+		}
 		replyTo := 0
 		if m.replyTo != nil {
 			replyTo = m.replyTo.ID
@@ -396,13 +420,6 @@ func (m Model) handleInputKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.attached = nil
 			m.status = "Uploading " + telegram.ShortName(a.name) + "..."
 			return m, m.sendImage(*m.open, *a, text, replyTo)
-		}
-		if rest, ok := strings.CutPrefix(text, "/img "); ok {
-			path, caption, _ := strings.Cut(strings.TrimSpace(rest), " ")
-			path = expandHome(path)
-			m.status = "Uploading " + telegram.ShortName(filepath.Base(path)) + "..."
-			a := attachment{path: path, name: filepath.Base(path)}
-			return m, m.sendImage(*m.open, a, strings.TrimSpace(caption), replyTo)
 		}
 		return m, m.send(*m.open, text, replyTo)
 	}
@@ -619,6 +636,10 @@ func (m *Model) layout() {
 // render rebuilds the message pane content. It leaves the scroll position to
 // the caller.
 func (m *Model) render() {
+	if m.help {
+		m.view.SetContent(helpText())
+		return
+	}
 	if m.open == nil {
 		m.view.SetContent(dim.Render("Select a chat and press Enter."))
 		return
@@ -690,8 +711,10 @@ func (m Model) View() string {
 
 	list := listStyle.Width(listWidth).Height(m.view.Height + 4).Render(m.renderList(m.view.Height + 4))
 
-	hint := dim.Render(truncate("Ctrl+R: reply  Ctrl+V or /img <path>: attach an image", m.view.Width))
+	hint := dim.Render(truncate("/help or Ctrl+H: commands and keys", m.view.Width))
 	switch {
+	case m.help:
+		hint = dim.Render("Any key closes the help")
 	case m.focus == focusPick:
 		hint = dim.Render("Up/Down: choose  Enter: reply  Esc: cancel")
 	case m.attached != nil:
