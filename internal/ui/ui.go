@@ -136,8 +136,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if !msg.older {
-			m.messages = msg.msgs
-			m.noOlder = len(msg.msgs) < telegram.HistoryPage
+			if len(m.messages) == 0 {
+				m.noOlder = len(msg.msgs) < telegram.HistoryPage
+			}
+			m.messages = mergeLatest(m.messages, msg.msgs)
 			m.render()
 			m.view.GotoBottom()
 			return m, m.markRead(msg.msgs)
@@ -339,7 +341,7 @@ func (m Model) handlePickKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 // the chat it belongs to and moves that chat to the top.
 func (m *Model) receive(msg telegram.Message) tea.Cmd {
 	var cmds []tea.Cmd
-	if m.open != nil && m.open.Key == msg.ChatKey {
+	if m.open != nil && m.open.Key == msg.ChatKey && !hasMessage(m.messages, msg.ID) {
 		follow := m.view.AtBottom()
 		m.messages = append(m.messages, msg)
 		m.render()
@@ -632,6 +634,32 @@ func expandHome(path string) string {
 		}
 	}
 	return path
+}
+
+// mergeLatest puts a freshly loaded latest page after the loaded messages
+// older than it, so reloading after a send keeps scrollback and shows each
+// message once.
+func mergeLatest(loaded, latest []telegram.Message) []telegram.Message {
+	if len(latest) == 0 {
+		return loaded
+	}
+	first := latest[0].ID
+	merged := make([]telegram.Message, 0, len(loaded)+len(latest))
+	for _, msg := range loaded {
+		if msg.ID < first {
+			merged = append(merged, msg)
+		}
+	}
+	return append(merged, latest...)
+}
+
+func hasMessage(msgs []telegram.Message, id int) bool {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func senderName(msg telegram.Message) string {

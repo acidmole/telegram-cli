@@ -61,6 +61,7 @@ func run() error {
 	tc := gotd.NewClient(apiID, apiHash, gotd.Options{
 		SessionStorage: &session.FileStorage{Path: sessionPath},
 		UpdateHandler:  handler,
+		Middlewares:    []gotd.Middleware{client.Middleware()},
 	})
 
 	return tc.Run(ctx, func(ctx context.Context) error {

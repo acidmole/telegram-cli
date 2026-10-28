@@ -14,6 +14,7 @@ import (
 	"github.com/gotd/td/telegram/message"
 	"github.com/gotd/td/telegram/message/styling"
 	"github.com/gotd/td/telegram/updates"
+	updhook "github.com/gotd/td/telegram/updates/hook"
 	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
 )
@@ -70,6 +71,14 @@ func NewUpdateHandler() (telegram.UpdateHandler, *Client) {
 	})
 	c.gaps = updates.New(updates.Config{Handler: d})
 	return c.gaps, c
+}
+
+// Middleware feeds the updates that method results carry, such as the one
+// for a message just sent, to the update tracker. Without it the tracker
+// sees a gap after every send, fetches the difference and delivers our own
+// message once more.
+func (c *Client) Middleware() telegram.Middleware {
+	return updhook.UpdateHook(c.gaps.Handle)
 }
 
 // Attach binds the client to an authorized connection and starts receiving
