@@ -34,7 +34,10 @@ var (
 	// nameColors are 256-color codes that stay readable on dark and light
 	// backgrounds; each sender keeps one of them for good.
 	nameColors = []lipgloss.Color{"167", "173", "179", "107", "72", "74", "68", "134", "169", "142", "37", "98"}
-	meStyle    = bold.Foreground(lipgloss.Color("245"))
+	// mine colors your own messages, name and text alike: a quiet steel
+	// blue, darker on light backgrounds.
+	mine    = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "24", Dark: "110"})
+	meStyle = mine.Bold(true)
 )
 
 type focus int
@@ -84,6 +87,8 @@ type Model struct {
 	focus   focus
 	pick    int
 	replyTo *telegram.Message
+	// attached is a pasted image that goes out with the next Enter.
+	attached *attachment
 
 	view   viewport.Model
 	input  textinput.Model
@@ -150,6 +155,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case incomingMsg:
 		return m, tea.Batch(m.receive(telegram.Message(msg)), m.waitForUpdate())
 
+	case clipboardMsg:
+		if msg.image != nil {
+			if m.open == nil {
+				discard(msg.image)
+				return m, nil
+			}
+			m.attach(msg.image)
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(msg.text), Paste: true})
+		return m, cmd
+
 	case sentMsg:
 		if strings.HasPrefix(m.status, "Uploading ") {
 			m.status = "Sent."
@@ -215,6 +233,7 @@ func (m Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.open = &chat
 		m.messages = nil
 		m.replyTo = nil
+		m.detach()
 		m.noOlder, m.loadingOlder = false, false
 		m.render()
 		m.setFocus(focusInput)
@@ -224,11 +243,28 @@ func (m Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleInputKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if k.Paste {
+		// An image on the clipboard pastes as nothing, so an empty paste
+		// is the cue to look for one.
+		if strings.TrimSpace(string(k.Runes)) == "" {
+			return m, readClipboard()
+		}
+		if a := imageFile(string(k.Runes)); a != nil {
+			m.attach(a)
+			return m, nil
+		}
+	}
+
 	switch k.String() {
+	case "ctrl+v":
+		return m, readClipboard()
 	case "esc":
-		if m.replyTo != nil {
+		switch {
+		case m.attached != nil:
+			m.detach()
+		case m.replyTo != nil:
 			m.replyTo = nil
-		} else {
+		default:
 			m.setFocus(focusList)
 		}
 		return m, nil
@@ -242,7 +278,7 @@ func (m Model) handleInputKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		text := strings.TrimSpace(m.input.Value())
-		if text == "" || m.open == nil {
+		if m.open == nil || (text == "" && m.attached == nil) {
 			return m, nil
 		}
 		replyTo := 0
@@ -251,10 +287,17 @@ func (m Model) handleInputKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.input.Reset()
 		m.replyTo = nil
+		if a := m.attached; a != nil {
+			m.attached = nil
+			m.status = "Uploading " + telegram.ShortName(a.name) + "..."
+			return m, m.sendImage(*m.open, *a, text, replyTo)
+		}
 		if rest, ok := strings.CutPrefix(text, "/img "); ok {
 			path, caption, _ := strings.Cut(strings.TrimSpace(rest), " ")
+			path = expandHome(path)
 			m.status = "Uploading " + telegram.ShortName(filepath.Base(path)) + "..."
-			return m, m.sendImage(*m.open, expandHome(path), strings.TrimSpace(caption), replyTo)
+			a := attachment{path: path, name: filepath.Base(path)}
+			return m, m.sendImage(*m.open, a, strings.TrimSpace(caption), replyTo)
 		}
 		return m, m.send(*m.open, text, replyTo)
 	}
@@ -376,7 +419,11 @@ func (m *Model) render() {
 			block.WriteString(dim.Render(truncate(quote, m.view.Width)) + "\n")
 		}
 		head := dim.Render(msg.Date.Format("Jan 02 15:04")) + " " + nameStyle(msg).Render(senderName(msg))
-		block.WriteString(wrap.Render(head + ": " + msg.Text))
+		body := msg.Text
+		if msg.Out {
+			body = mine.Render(body)
+		}
+		block.WriteString(wrap.Render(head + ": " + body))
 
 		text := block.String()
 		if m.focus == focusPick && i == m.pick {
@@ -416,10 +463,16 @@ func (m Model) View() string {
 
 	list := listStyle.Width(listWidth).Height(m.view.Height + 4).Render(m.renderList(m.view.Height + 4))
 
-	hint := dim.Render(truncate("Ctrl+R: reply to a message  /img <path> [caption]: attach an image", m.view.Width))
+	hint := dim.Render(truncate("Ctrl+R: reply  Ctrl+V or /img <path>: attach an image", m.view.Width))
 	switch {
 	case m.focus == focusPick:
 		hint = dim.Render("Up/Down: choose  Enter: reply  Esc: cancel")
+	case m.attached != nil:
+		label := "Image " + telegram.ShortName(m.attached.name)
+		if m.replyTo != nil {
+			label += " in reply to " + senderName(*m.replyTo)
+		}
+		hint = truncate(label, m.view.Width-37) + dim.Render(" (type a caption, Esc removes image)")
 	case m.replyTo != nil:
 		hint = truncate("Replying to "+senderName(*m.replyTo)+": "+oneLine(m.replyTo.Text), m.view.Width-14) + dim.Render(" (Esc cancels)")
 	}
@@ -528,9 +581,32 @@ func (m Model) send(chat telegram.Chat, text string, replyTo int) tea.Cmd {
 	}
 }
 
-func (m Model) sendImage(chat telegram.Chat, path, caption string, replyTo int) tea.Cmd {
+// attach stages an image for the next message, replacing any staged one.
+func (m *Model) attach(a *attachment) {
+	m.detach()
+	m.attached = a
+	m.status = "Attached " + telegram.ShortName(a.name) + ". Enter sends it."
+}
+
+func (m *Model) detach() {
+	if m.attached != nil {
+		discard(m.attached)
+		m.attached = nil
+	}
+}
+
+// discard removes the file behind a clipboard image; files the user named
+// are theirs and stay.
+func discard(a *attachment) {
+	if a.temp {
+		os.Remove(a.path)
+	}
+}
+
+func (m Model) sendImage(chat telegram.Chat, a attachment, caption string, replyTo int) tea.Cmd {
 	return func() tea.Msg {
-		if err := m.client.SendImage(m.ctx, chat, path, caption, replyTo); err != nil {
+		defer discard(&a)
+		if err := m.client.SendImage(m.ctx, chat, a.path, caption, replyTo); err != nil {
 			return errMsg{err}
 		}
 		return sentMsg{chat}
