@@ -25,8 +25,8 @@ import (
 	"github.com/gotd/td/tg"
 	"golang.org/x/term"
 
-	"telegram-cli/internal/telegram"
-	"telegram-cli/internal/ui"
+	"github.com/acidmole/telegram-cli/internal/telegram"
+	"github.com/acidmole/telegram-cli/internal/ui"
 )
 
 func main() {

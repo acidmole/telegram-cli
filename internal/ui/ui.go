@@ -17,7 +17,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"telegram-cli/internal/telegram"
+	"github.com/acidmole/telegram-cli/internal/telegram"
 )
 
 const listWidth = 30

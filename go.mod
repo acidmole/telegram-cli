@@ -1,4 +1,4 @@
-module telegram-cli
+module github.com/acidmole/telegram-cli
 
 go 1.27.3
 

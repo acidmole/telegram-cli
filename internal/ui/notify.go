@@ -6,7 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"telegram-cli/internal/telegram"
+	"github.com/acidmole/telegram-cli/internal/telegram"
 )
 
 // notify shows a desktop notification through notify-send. Failures are

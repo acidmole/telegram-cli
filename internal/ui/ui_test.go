@@ -7,7 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"telegram-cli/internal/telegram"
+	"github.com/acidmole/telegram-cli/internal/telegram"
 )
 
 func ids(msgs []telegram.Message) []int {

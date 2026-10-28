@@ -7,7 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"telegram-cli/internal/telegram"
+	"github.com/acidmole/telegram-cli/internal/telegram"
 )
 
 // command is something typed in the input line after a slash. A slash at
