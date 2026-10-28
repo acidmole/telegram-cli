@@ -37,16 +37,51 @@ type Message struct {
 	Text    string
 	Date    time.Time
 	Out     bool
+	Edited  bool
 	// ReplyTo is the ID of the message this one answers, or 0.
 	ReplyTo int
 }
 
+// Event is something that happened in a chat: one of NewMessage,
+// EditedMessage, DeletedMessages or Typing.
+type Event interface{ event() }
+
+// NewMessage is a message that just arrived.
+type NewMessage struct{ Message }
+
+// EditedMessage is the new version of a message that was changed.
+type EditedMessage struct{ Message }
+
+// DeletedMessages lists messages removed from a chat.
+type DeletedMessages struct {
+	// ChatKey is empty for private chats and basic groups: Telegram does
+	// not say which chat it was, but their message IDs are unique across
+	// the account.
+	ChatKey string
+	IDs     []int
+}
+
+// Typing reports what someone is doing in a chat, such as "typing", or
+// that they stopped.
+type Typing struct {
+	ChatKey string
+	UserKey string
+	Who     string
+	Action  string
+	Stopped bool
+}
+
+func (NewMessage) event()      {}
+func (EditedMessage) event()   {}
+func (DeletedMessages) event() {}
+func (Typing) event()          {}
+
 // Client is a logged-in Telegram session.
 type Client struct {
-	api     *tg.Client
-	sender  *message.Sender
-	gaps    *updates.Manager
-	updates chan Message
+	api    *tg.Client
+	sender *message.Sender
+	gaps   *updates.Manager
+	events chan Event
 
 	mu    sync.Mutex
 	names map[string]string
@@ -57,16 +92,45 @@ type Client struct {
 // Attach is called.
 func NewUpdateHandler() (telegram.UpdateHandler, *Client) {
 	c := &Client{
-		updates: make(chan Message, 64),
-		names:   map[string]string{},
+		events: make(chan Event, 64),
+		names:  map[string]string{},
 	}
 	d := tg.NewUpdateDispatcher()
 	d.OnNewMessage(func(ctx context.Context, e tg.Entities, u *tg.UpdateNewMessage) error {
-		c.handleNew(e, u.Message)
+		c.handleMessage(e, u.Message, false)
 		return nil
 	})
 	d.OnNewChannelMessage(func(ctx context.Context, e tg.Entities, u *tg.UpdateNewChannelMessage) error {
-		c.handleNew(e, u.Message)
+		c.handleMessage(e, u.Message, false)
+		return nil
+	})
+	d.OnEditMessage(func(ctx context.Context, e tg.Entities, u *tg.UpdateEditMessage) error {
+		c.handleMessage(e, u.Message, true)
+		return nil
+	})
+	d.OnEditChannelMessage(func(ctx context.Context, e tg.Entities, u *tg.UpdateEditChannelMessage) error {
+		c.handleMessage(e, u.Message, true)
+		return nil
+	})
+	d.OnDeleteMessages(func(ctx context.Context, e tg.Entities, u *tg.UpdateDeleteMessages) error {
+		c.emit(DeletedMessages{IDs: u.Messages})
+		return nil
+	})
+	d.OnDeleteChannelMessages(func(ctx context.Context, e tg.Entities, u *tg.UpdateDeleteChannelMessages) error {
+		c.emit(DeletedMessages{ChatKey: fmt.Sprintf("ch%d", u.ChannelID), IDs: u.Messages})
+		return nil
+	})
+	d.OnUserTyping(func(ctx context.Context, e tg.Entities, u *tg.UpdateUserTyping) error {
+		key := fmt.Sprintf("u%d", u.UserID)
+		c.handleTyping(e, key, &tg.PeerUser{UserID: u.UserID}, u.Action)
+		return nil
+	})
+	d.OnChatUserTyping(func(ctx context.Context, e tg.Entities, u *tg.UpdateChatUserTyping) error {
+		c.handleTyping(e, fmt.Sprintf("c%d", u.ChatID), u.FromID, u.Action)
+		return nil
+	})
+	d.OnChannelUserTyping(func(ctx context.Context, e tg.Entities, u *tg.UpdateChannelUserTyping) error {
+		c.handleTyping(e, fmt.Sprintf("ch%d", u.ChannelID), u.FromID, u.Action)
 		return nil
 	})
 	c.gaps = updates.New(updates.Config{Handler: d})
@@ -89,8 +153,8 @@ func (c *Client) Attach(ctx context.Context, tc *telegram.Client, selfID int64) 
 	return c.gaps.Run(ctx, c.api, selfID, updates.AuthOptions{})
 }
 
-// Updates delivers incoming messages from every chat.
-func (c *Client) Updates() <-chan Message { return c.updates }
+// Events delivers what happens in every chat.
+func (c *Client) Events() <-chan Event { return c.events }
 
 // Chats returns the most recent chats, newest first.
 func (c *Client) Chats(ctx context.Context) ([]Chat, error) {
@@ -205,7 +269,55 @@ func (c *Client) MarkRead(ctx context.Context, chat Chat, maxID int) error {
 	return err
 }
 
-func (c *Client) handleNew(e tg.Entities, mc tg.MessageClass) {
+func (c *Client) handleMessage(e tg.Entities, mc tg.MessageClass, edited bool) {
+	c.rememberEntities(e)
+	m, ok := c.convert(mc)
+	if !ok {
+		return
+	}
+	if edited {
+		c.emit(EditedMessage{m})
+	} else {
+		c.emit(NewMessage{m})
+	}
+}
+
+func (c *Client) handleTyping(e tg.Entities, chatKey string, from tg.PeerClass, action tg.SendMessageActionClass) {
+	c.rememberEntities(e)
+	userKey := peerKey(from)
+	t := Typing{ChatKey: chatKey, UserKey: userKey, Who: c.name(userKey)}
+	switch action.(type) {
+	case *tg.SendMessageCancelAction:
+		t.Stopped = true
+	case *tg.SendMessageTypingAction:
+		t.Action = "typing"
+	case *tg.SendMessageRecordAudioAction, *tg.SendMessageUploadAudioAction:
+		t.Action = "recording a voice message"
+	case *tg.SendMessageUploadPhotoAction:
+		t.Action = "sending a photo"
+	case *tg.SendMessageRecordVideoAction, *tg.SendMessageUploadVideoAction,
+		*tg.SendMessageRecordRoundAction, *tg.SendMessageUploadRoundAction:
+		t.Action = "sending a video"
+	case *tg.SendMessageUploadDocumentAction:
+		t.Action = "sending a file"
+	case *tg.SendMessageChooseStickerAction:
+		t.Action = "choosing a sticker"
+	default:
+		return
+	}
+	c.emit(t)
+}
+
+// emit hands an event to the UI without ever blocking the update loop on
+// it: when the UI falls that far behind, the event is dropped.
+func (c *Client) emit(ev Event) {
+	select {
+	case c.events <- ev:
+	default:
+	}
+}
+
+func (c *Client) rememberEntities(e tg.Entities) {
 	users := make([]tg.UserClass, 0, len(e.Users))
 	for _, u := range e.Users {
 		users = append(users, u)
@@ -218,14 +330,6 @@ func (c *Client) handleNew(e tg.Entities, mc tg.MessageClass) {
 		chats = append(chats, ch)
 	}
 	c.remember(users, chats)
-
-	if m, ok := c.convert(mc); ok {
-		// Never block the update loop on a slow UI; drop instead.
-		select {
-		case c.updates <- m:
-		default:
-		}
-	}
 }
 
 // remember caches display names and returns the input peers it could build,
@@ -301,6 +405,7 @@ func (c *Client) convert(mc tg.MessageClass) (Message, bool) {
 		Text:    text,
 		Date:    time.Unix(int64(m.Date), 0),
 		Out:     m.Out,
+		Edited:  m.EditDate != 0 && !m.EditHide,
 		ReplyTo: replyTo,
 	}, true
 }

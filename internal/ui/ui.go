@@ -8,7 +8,9 @@ import (
 	"hash/fnv"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -56,9 +58,10 @@ type (
 		older bool
 		msgs  []telegram.Message
 	}
-	incomingMsg telegram.Message
-	sentMsg     struct{ chat telegram.Chat }
-	errMsg      struct{ err error }
+	eventMsg   struct{ ev telegram.Event }
+	typingTick struct{}
+	sentMsg    struct{ chat telegram.Chat }
+	errMsg     struct{ err error }
 )
 
 // Options tune the interface.
@@ -74,15 +77,22 @@ type Model struct {
 	client *telegram.Client
 	opts   Options
 
-	chats    []telegram.Chat
-	cursor   int
-	open     *telegram.Chat
-	messages []telegram.Message
+	chats []telegram.Chat
+	// cursor indexes the chats the search leaves visible.
+	cursor    int
+	searching bool
+	search    textinput.Model
+	open      *telegram.Chat
+	messages  []telegram.Message
 	// lineStarts[i] is the viewport line where messages[i] begins.
 	lineStarts []int
 
 	loadingOlder bool
 	noOlder      bool
+
+	// typing maps a chat key to who is doing what in it, until when.
+	typing  map[string]map[string]typer
+	ticking bool
 
 	focus   focus
 	pick    int
@@ -102,11 +112,16 @@ func New(ctx context.Context, client *telegram.Client, opts Options) Model {
 	in := textinput.New()
 	in.Placeholder = "Type a message, Enter to send"
 	in.Prompt = "> "
+	search := textinput.New()
+	search.Prompt = "/"
+	search.Placeholder = "search chats"
 	return Model{
 		ctx:    ctx,
 		client: client,
 		opts:   opts,
 		input:  in,
+		search: search,
+		typing: map[string]map[string]typer{},
 		view:   viewport.New(0, 0),
 		status: "Loading chats...",
 	}
@@ -125,10 +140,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case chatsMsg:
 		m.chats = msg
-		if m.cursor >= len(m.chats) {
-			m.cursor = max(len(m.chats)-1, 0)
+		if n := len(m.visible()); m.cursor >= n {
+			m.cursor = max(n-1, 0)
 		}
-		m.status = fmt.Sprintf("%d chats. Enter: open  Tab: switch pane  Esc: back  Ctrl+C: quit", len(m.chats))
+		m.status = fmt.Sprintf("%d chats. Enter: open  /: search  Tab: switch pane  Esc: back  Ctrl+C: quit", len(m.chats))
 		return m, nil
 
 	case historyMsg:
@@ -154,8 +169,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.view.SetYOffset(m.view.YOffset + m.view.TotalLineCount() - before)
 		return m, nil
 
-	case incomingMsg:
-		return m, tea.Batch(m.receive(telegram.Message(msg)), m.waitForUpdate())
+	case eventMsg:
+		return m, tea.Batch(m.handleEvent(msg.ev), m.waitForUpdate())
+
+	case typingTick:
+		m.ticking = false
+		m.pruneTyping(time.Now())
+		return m, m.tickTyping()
 
 	case clipboardMsg:
 		if msg.image != nil {
@@ -214,34 +234,117 @@ func (m Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case focusPick:
 		return m.handlePickKey(k)
 	}
+	if m.searching {
+		return m.handleSearchKey(k)
+	}
 
 	switch k.String() {
 	case "q":
 		return m, tea.Quit
+	case "/":
+		m.searching = true
+		m.cursor = 0
+		return m, m.search.Focus()
 	case "up", "k":
-		if m.cursor > 0 {
-			m.cursor--
-		}
+		m.moveCursor(-1)
 	case "down", "j":
-		if m.cursor < len(m.chats)-1 {
-			m.cursor++
-		}
+		m.moveCursor(1)
 	case "enter", "l":
-		if len(m.chats) == 0 {
-			return m, nil
-		}
-		m.chats[m.cursor].Unread = 0
-		chat := m.chats[m.cursor]
-		m.open = &chat
-		m.messages = nil
-		m.replyTo = nil
-		m.detach()
-		m.noOlder, m.loadingOlder = false, false
-		m.render()
-		m.setFocus(focusInput)
-		return m, m.loadHistory(chat)
+		return m.openSelected()
 	}
 	return m, nil
+}
+
+// handleSearchKey edits the chat search. Arrows move through the matches,
+// since letters belong to the query.
+func (m Model) handleSearchKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch k.String() {
+	case "esc":
+		m.endSearch()
+		return m, nil
+	case "up", "ctrl+p":
+		m.moveCursor(-1)
+		return m, nil
+	case "down", "ctrl+n":
+		m.moveCursor(1)
+		return m, nil
+	case "enter":
+		return m.openSelected()
+	}
+	var cmd tea.Cmd
+	before := m.search.Value()
+	m.search, cmd = m.search.Update(k)
+	if m.search.Value() != before {
+		m.cursor = 0
+	}
+	return m, cmd
+}
+
+// endSearch clears the search and keeps the chat it had selected selected.
+func (m *Model) endSearch() {
+	key, ok := m.selectedKey()
+	m.searching = false
+	m.search.Reset()
+	m.search.Blur()
+	m.cursor = 0
+	if ok {
+		m.selectKey(key)
+	}
+}
+
+// visible returns the indexes in m.chats of the chats the search matches,
+// all of them when there is no search.
+func (m Model) visible() []int {
+	query := strings.ToLower(strings.TrimSpace(m.search.Value()))
+	idx := make([]int, 0, len(m.chats))
+	for i, c := range m.chats {
+		if !m.searching || query == "" || strings.Contains(strings.ToLower(c.Title), query) {
+			idx = append(idx, i)
+		}
+	}
+	return idx
+}
+
+func (m Model) selectedKey() (string, bool) {
+	vis := m.visible()
+	if m.cursor >= len(vis) {
+		return "", false
+	}
+	return m.chats[vis[m.cursor]].Key, true
+}
+
+func (m *Model) selectKey(key string) {
+	for j, i := range m.visible() {
+		if m.chats[i].Key == key {
+			m.cursor = j
+			return
+		}
+	}
+}
+
+func (m *Model) moveCursor(by int) {
+	m.cursor = min(max(m.cursor+by, 0), max(len(m.visible())-1, 0))
+}
+
+func (m Model) openSelected() (tea.Model, tea.Cmd) {
+	vis := m.visible()
+	if m.cursor >= len(vis) {
+		return m, nil
+	}
+	i := vis[m.cursor]
+	m.chats[i].Unread = 0
+	chat := m.chats[i]
+	if m.searching {
+		m.endSearch()
+	}
+	m.open = &chat
+	m.messages = nil
+	m.replyTo = nil
+	m.detach()
+	m.noOlder, m.loadingOlder = false, false
+	m.render()
+	m.setFocus(focusInput)
+	return m, m.loadHistory(chat)
 }
 
 func (m Model) handleInputKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -337,6 +440,127 @@ func (m Model) handlePickKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m *Model) handleEvent(ev telegram.Event) tea.Cmd {
+	switch ev := ev.(type) {
+	case telegram.NewMessage:
+		// A message ends whatever its sender was doing.
+		delete(m.typing[ev.ChatKey], ev.FromKey)
+		return m.receive(ev.Message)
+
+	case telegram.EditedMessage:
+		if m.open == nil || m.open.Key != ev.ChatKey {
+			return nil
+		}
+		for i := range m.messages {
+			if m.messages[i].ID == ev.ID {
+				m.messages[i] = ev.Message
+				m.render()
+				break
+			}
+		}
+
+	case telegram.DeletedMessages:
+		if m.open == nil {
+			return nil
+		}
+		// Without a chat key the IDs belong to private chats and basic
+		// groups, which never share IDs with channels.
+		if ev.ChatKey != m.open.Key && (ev.ChatKey != "" || strings.HasPrefix(m.open.Key, "ch")) {
+			return nil
+		}
+		gone := make(map[int]bool, len(ev.IDs))
+		for _, id := range ev.IDs {
+			gone[id] = true
+		}
+		kept := make([]telegram.Message, 0, len(m.messages))
+		for _, msg := range m.messages {
+			if !gone[msg.ID] {
+				kept = append(kept, msg)
+			}
+		}
+		if len(kept) == len(m.messages) {
+			return nil
+		}
+		m.messages = kept
+		if m.replyTo != nil && gone[m.replyTo.ID] {
+			m.replyTo = nil
+		}
+		if m.focus == focusPick {
+			if len(m.messages) == 0 {
+				m.setFocus(focusInput)
+			}
+			m.pick = min(m.pick, max(len(m.messages)-1, 0))
+		}
+		m.render()
+
+	case telegram.Typing:
+		if ev.Stopped {
+			delete(m.typing[ev.ChatKey], ev.UserKey)
+			return nil
+		}
+		if m.typing[ev.ChatKey] == nil {
+			m.typing[ev.ChatKey] = map[string]typer{}
+		}
+		m.typing[ev.ChatKey][ev.UserKey] = typer{who: ev.Who, action: ev.Action, until: time.Now().Add(typingFor)}
+		return m.tickTyping()
+	}
+	return nil
+}
+
+// typer is someone doing something in a chat.
+type typer struct {
+	who, action string
+	until       time.Time
+}
+
+// typingFor is how long a typing report holds. Clients repeat it every few
+// seconds while typing goes on; Telegram's own apps give up after six.
+const typingFor = 6 * time.Second
+
+// tickTyping schedules the next expiry check while anyone is typing.
+func (m *Model) tickTyping() tea.Cmd {
+	if m.ticking || len(m.typing) == 0 {
+		return nil
+	}
+	m.ticking = true
+	return tea.Tick(time.Second, func(time.Time) tea.Msg { return typingTick{} })
+}
+
+func (m *Model) pruneTyping(now time.Time) {
+	for chat, users := range m.typing {
+		for user, t := range users {
+			if now.After(t.until) {
+				delete(users, user)
+			}
+		}
+		if len(users) == 0 {
+			delete(m.typing, chat)
+		}
+	}
+}
+
+// typingLine says who is doing what in a chat: "Anna is typing",
+// "Anna and Ben are typing", "3 people are typing".
+func (m Model) typingLine(chatKey string) string {
+	users := m.typing[chatKey]
+	switch len(users) {
+	case 0:
+		return ""
+	case 1:
+		for _, t := range users {
+			return t.who + " is " + t.action
+		}
+	case 2:
+		var names []string
+		for _, t := range users {
+			names = append(names, t.who)
+		}
+		sort.Strings(names)
+		return names[0] + " and " + names[1] + " are typing"
+	}
+	return fmt.Sprintf("%d people are typing", len(users))
+}
+
 // receive appends a message to the open chat, or bumps the unread counter of
 // the chat it belongs to and moves that chat to the top.
 func (m *Model) receive(msg telegram.Message) tea.Cmd {
@@ -361,13 +585,11 @@ func (m *Model) receive(msg telegram.Message) tea.Cmd {
 				cmds = append(cmds, notify(c, msg))
 			}
 		}
-		selected := m.chats[m.cursor].Key
+		selected, ok := m.selectedKey()
 		copy(m.chats[1:i+1], m.chats[:i])
 		m.chats[0] = c
-		for j := range m.chats {
-			if m.chats[j].Key == selected {
-				m.cursor = j
-			}
+		if ok {
+			m.selectKey(selected)
 		}
 		return tea.Batch(cmds...)
 	}
@@ -424,6 +646,9 @@ func (m *Model) render() {
 		body := msg.Text
 		if msg.Out {
 			body = mine.Render(body)
+		}
+		if msg.Edited {
+			body += dim.Render(" (edited)")
 		}
 		block.WriteString(wrap.Render(head + ": " + body))
 
@@ -486,6 +711,9 @@ func (m Model) View() string {
 	title := "No chat open"
 	if m.open != nil {
 		title = m.open.Title
+		if t := m.typingLine(m.open.Key); t != "" {
+			title += "  (" + t + "...)"
+		}
 	}
 	status := m.status
 	if m.loadingOlder {
@@ -496,19 +724,29 @@ func (m Model) View() string {
 }
 
 func (m Model) renderList(height int) string {
-	if len(m.chats) == 0 {
-		return dim.Render("(no chats)")
+	var rows []string
+	if m.searching {
+		m.search.Width = listWidth - 2
+		rows = append(rows, m.search.View())
+		height--
+	}
+	vis := m.visible()
+	if len(vis) == 0 {
+		empty := "(no chats)"
+		if m.searching {
+			empty = "(no match)"
+		}
+		return strings.Join(append(rows, dim.Render(empty)), "\n")
 	}
 	// Keep the cursor visible by scrolling the window of rows.
 	start := 0
 	if m.cursor >= height {
 		start = m.cursor - height + 1
 	}
-	var rows []string
-	for i := start; i < len(m.chats) && i < start+height; i++ {
-		c := m.chats[i]
+	for j := start; j < len(vis) && j < start+height; j++ {
+		c := m.chats[vis[j]]
 		marker := "  "
-		if i == m.cursor {
+		if j == m.cursor {
 			marker = "> "
 		}
 		unread := ""
@@ -516,7 +754,7 @@ func (m Model) renderList(height int) string {
 			unread = fmt.Sprintf(" (%d)", c.Unread)
 		}
 		row := truncate(marker+c.Title, listWidth-len(unread)) + unread
-		if i == m.cursor {
+		if j == m.cursor {
 			row = bold.Render(row)
 		}
 		rows = append(rows, row)
@@ -618,8 +856,8 @@ func (m Model) sendImage(chat telegram.Chat, a attachment, caption string, reply
 func (m Model) waitForUpdate() tea.Cmd {
 	return func() tea.Msg {
 		select {
-		case msg := <-m.client.Updates():
-			return incomingMsg(msg)
+		case ev := <-m.client.Events():
+			return eventMsg{ev}
 		case <-m.ctx.Done():
 			return nil
 		}
