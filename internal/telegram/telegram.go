@@ -1,11 +1,14 @@
 // Package telegram wraps gotd/td with the few operations the TUI needs:
-// listing chats, reading history, sending text and streaming new messages.
+// listing chats, reading history, sending text and media and streaming new
+// messages.
 package telegram
 
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -234,14 +237,33 @@ func (c *Client) Send(ctx context.Context, chat Chat, text string, replyTo int) 
 	return err
 }
 
-// imageExts are the formats Telegram accepts as photos.
-var imageExts = map[string]bool{".jpg": true, ".jpeg": true, ".png": true, ".webp": true}
+// mediaTypes are the files Telegram shows inline, by extension: images as
+// photos, the rest as playable videos.
+var mediaTypes = map[string]string{
+	".jpg":  "image/jpeg",
+	".jpeg": "image/jpeg",
+	".png":  "image/png",
+	".webp": "image/webp",
+	".mp4":  "video/mp4",
+	".m4v":  "video/mp4",
+	".mov":  "video/quicktime",
+	".webm": "video/webm",
+	".mkv":  "video/x-matroska",
+}
 
-// SendImage uploads the image at path and posts it as a photo with an
+// MediaKind tells by its extension how a file can be sent: "image",
+// "video", or "" when it can be neither.
+func MediaKind(path string) string {
+	kind, _, _ := strings.Cut(mediaTypes[strings.ToLower(filepath.Ext(path))], "/")
+	return kind
+}
+
+// SendMedia uploads the image or video at path and posts it with an
 // optional caption, as a reply when replyTo is not 0.
-func (c *Client) SendImage(ctx context.Context, chat Chat, path, caption string, replyTo int) error {
-	if !imageExts[strings.ToLower(filepath.Ext(path))] {
-		return fmt.Errorf("%s: not a jpg, png or webp image", filepath.Base(path))
+func (c *Client) SendMedia(ctx context.Context, chat Chat, path, caption string, replyTo int) error {
+	mime := mediaTypes[strings.ToLower(filepath.Ext(path))]
+	if mime == "" {
+		return fmt.Errorf("%s: not a jpg, png or webp image or an mp4, mov, webm or mkv video", filepath.Base(path))
 	}
 	file, err := uploader.NewUploader(c.api).FromPath(ctx, path)
 	if err != nil {
@@ -251,8 +273,47 @@ func (c *Client) SendImage(ctx context.Context, chat Chat, path, caption string,
 	if replyTo != 0 {
 		b = b.Reply(replyTo)
 	}
-	_, err = b.Media(ctx, message.UploadedPhoto(file, styling.Plain(caption)))
+	if MediaKind(path) == "image" {
+		_, err = b.Media(ctx, message.UploadedPhoto(file, styling.Plain(caption)))
+		return err
+	}
+	video := message.UploadedDocument(file, styling.Plain(caption)).
+		Filename(filepath.Base(path)).MIME(mime).Video().SupportsStreaming()
+	if w, h, d, ok := probeVideo(ctx, path); ok {
+		video = video.Resolution(w, h).Duration(d)
+	}
+	_, err = b.Media(ctx, video)
 	return err
+}
+
+// probeVideo reads a video's size and length with ffprobe. Telegram does
+// not work them out itself, and without them apps show a 0:00 video with a
+// guessed shape; ok is false when ffprobe is missing or cannot tell.
+func probeVideo(ctx context.Context, path string) (w, h int, d time.Duration, ok bool) {
+	out, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-select_streams", "v:0",
+		"-show_entries", "stream=width,height:format=duration", "-of", "default=noprint_wrappers=1", path).Output()
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	return parseProbe(string(out))
+}
+
+// parseProbe reads ffprobe's key=value lines.
+func parseProbe(out string) (w, h int, d time.Duration, ok bool) {
+	for _, line := range strings.Fields(out) {
+		key, val, _ := strings.Cut(line, "=")
+		switch key {
+		case "width":
+			w, _ = strconv.Atoi(val)
+		case "height":
+			h, _ = strconv.Atoi(val)
+		case "duration":
+			if s, err := strconv.ParseFloat(val, 64); err == nil {
+				d = time.Duration(s * float64(time.Second))
+			}
+		}
+	}
+	return w, h, d, w > 0 && h > 0 && d > 0
 }
 
 // MarkRead marks the chat read up to and including message maxID, on every
@@ -428,6 +489,9 @@ func mediaLabel(media tg.MessageMediaClass) string {
 		}
 		if strings.HasPrefix(doc.MimeType, "image/") {
 			return "[img: " + ShortName(name) + "]"
+		}
+		if strings.HasPrefix(doc.MimeType, "video/") {
+			return "[video: " + ShortName(name) + "]"
 		}
 		return "[file: " + ShortName(name) + "]"
 	case *tg.MessageMediaGeo, *tg.MessageMediaGeoLive, *tg.MessageMediaVenue:

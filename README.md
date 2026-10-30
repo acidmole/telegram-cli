@@ -22,8 +22,10 @@ account (not a bot), built on [gotd/td](https://github.com/gotd/td) and
 - Chat list with unread counts and search (`/`)
 - Live messages, edits, deletions and typing indicators
 - Replies (`Ctrl+R`), with the quoted message shown above the answer
-- Images: `/img <path> [caption]`, or paste one with `Ctrl+V`
-- Media shown as its file name, at most 14 characters: `[img: holiday-b~.jpg]`
+- Images and videos: `/img` or `/video <path> [caption]`, or paste one
+  with `Ctrl+V`
+- Media shown as its file name, at most 14 characters: `[img: holiday-b~.jpg]`,
+  `[video: clip.mp4]`
 - Chats marked read on all your devices when you open them
 - Sender names in a stable color each; your own messages in a muted one
 - Desktop notifications for unmuted chats
@@ -34,7 +36,8 @@ account (not a bot), built on [gotd/td](https://github.com/gotd/td) and
 - Go 1.27 or later, to build it
 - A Telegram account, and an API ID for it (see below)
 - Optional: `wl-paste` (from `wl-clipboard`) to paste images on Wayland,
-  `notify-send` (from `libnotify`) for desktop notifications
+  `notify-send` (from `libnotify`) for desktop notifications, `ffprobe`
+  (from `ffmpeg`) so sent videos show their length and shape
 
 ## Installation
 
@@ -146,9 +149,9 @@ commands.
 |           | `q`                  | quit                                  |
 | Chat      | `Enter`              | send                                  |
 |           | `Ctrl+R`             | reply to a message                    |
-|           | `Ctrl+V`             | paste text or an image                |
+|           | `Ctrl+V`             | paste text, an image or a video       |
 |           | `PgUp`/`PgDn`        | scroll; `PgUp` at the top loads older |
-|           | `Esc`                | drop image or reply, back to the list |
+|           | `Esc`                | drop attachment or reply, then list   |
 | Anywhere  | `Tab`                | switch pane                           |
 |           | `Ctrl+H`             | help                                  |
 |           | `Ctrl+C`             | quit                                  |
@@ -157,11 +160,12 @@ commands.
 
 In the input line, a message that starts with `/` is a command:
 
-| Command                  | Does                            |
-|--------------------------|---------------------------------|
-| `/img <path> [caption]`  | send a jpg, png or webp image   |
-| `/help`                  | show keys and commands          |
-| `//text`                 | send text that starts with `/`  |
+| Command                   | Does                                  |
+|---------------------------|---------------------------------------|
+| `/img <path> [caption]`   | send a jpg, png or webp image         |
+| `/video <path> [caption]` | send an mp4, mov, webm or mkv video   |
+| `/help`                   | show keys and commands                |
+| `//text`                  | send text that starts with `/`        |
 
 An unknown command is never sent; it stays in the input so you can fix it.
 
@@ -174,7 +178,10 @@ An unknown command is never sent; it stays in the input so you can fix it.
 - **`FLOOD_WAIT`** errors: Telegram is rate-limiting the account. Wait the
   number of seconds it names before trying again.
 - **Ctrl+V pastes nothing**: install `wl-clipboard`. Only png, jpeg and
-  webp images can be sent.
+  webp images can be pasted as data; a video is pasted as its file, copied
+  in a file manager.
+- **A sent video shows 0:00 or the wrong shape**: install `ffmpeg`, whose
+  `ffprobe` reads the length and size Telegram needs to be told.
 - **Backspace opens the help**: your terminal sends `^H` for Backspace,
   which is also `Ctrl+H`. Set it to send `^?` (DEL), or use `/help`.
 

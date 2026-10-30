@@ -10,9 +10,11 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/acidmole/telegram-cli/internal/telegram"
 )
 
-// attachment is an image waiting to be sent with the next message.
+// attachment is an image or video waiting to be sent with the next message.
 type attachment struct {
 	path string
 	name string
@@ -20,10 +22,10 @@ type attachment struct {
 	temp bool
 }
 
-// clipboardMsg reports what a paste turned out to hold: an image to attach,
-// or text for the input line.
+// clipboardMsg reports what a paste turned out to hold: an image or video
+// to attach, or text for the input line.
 type clipboardMsg struct {
-	image *attachment
+	media *attachment
 	text  string
 }
 
@@ -65,7 +67,7 @@ func readClipboard() tea.Cmd {
 				os.Remove(f.Name())
 				return errMsg{err}
 			}
-			return clipboardMsg{image: &attachment{path: f.Name(), name: "clipboard" + ext, temp: true}}
+			return clipboardMsg{media: &attachment{path: f.Name(), name: "clipboard" + ext, temp: true}}
 		}
 		for _, t := range types {
 			if strings.HasPrefix(t, "image/") {
@@ -77,16 +79,16 @@ func readClipboard() tea.Cmd {
 		if err != nil {
 			return errMsg{err}
 		}
-		if a := imageFile(string(text)); a != nil {
-			return clipboardMsg{image: a}
+		if a := mediaFile(string(text)); a != nil {
+			return clipboardMsg{media: a}
 		}
 		return clipboardMsg{text: string(bytes.TrimRight(text, "\n"))}
 	}
 }
 
-// imageFile recognizes pasted text that names a single image file, as a
-// file manager's copy does ("file:///home/me/cat.png" or a plain path).
-func imageFile(text string) *attachment {
+// mediaFile recognizes pasted text that names a single image or video file,
+// as a file manager's copy does ("file:///home/me/cat.png" or a plain path).
+func mediaFile(text string) *attachment {
 	text = strings.TrimSpace(text)
 	if text == "" || strings.ContainsAny(text, "\n\r") {
 		return nil
@@ -96,23 +98,11 @@ func imageFile(text string) *attachment {
 		path = u.Path
 	}
 	path = expandHome(path)
-	if imageType(path) == "" {
+	if telegram.MediaKind(path) == "" {
 		return nil
 	}
 	if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
 		return nil
 	}
 	return &attachment{path: path, name: filepath.Base(path)}
-}
-
-func imageType(path string) string {
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".png":
-		return "image/png"
-	case ".jpg", ".jpeg":
-		return "image/jpeg"
-	case ".webp":
-		return "image/webp"
-	}
-	return ""
 }

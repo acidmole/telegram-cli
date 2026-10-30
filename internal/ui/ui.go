@@ -101,7 +101,7 @@ type Model struct {
 	helpOffset int
 	pick       int
 	replyTo    *telegram.Message
-	// attached is a pasted image that goes out with the next Enter.
+	// attached is a pasted image or video that goes out with the next Enter.
 	attached *attachment
 
 	view   viewport.Model
@@ -182,12 +182,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.tickTyping()
 
 	case clipboardMsg:
-		if msg.image != nil {
+		if msg.media != nil {
 			if m.open == nil {
-				discard(msg.image)
+				discard(msg.media)
 				return m, nil
 			}
-			m.attach(msg.image)
+			m.attach(msg.media)
 			return m, nil
 		}
 		var cmd tea.Cmd
@@ -371,7 +371,7 @@ func (m Model) handleInputKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if strings.TrimSpace(string(k.Runes)) == "" {
 			return m, readClipboard()
 		}
-		if a := imageFile(string(k.Runes)); a != nil {
+		if a := mediaFile(string(k.Runes)); a != nil {
 			m.attach(a)
 			return m, nil
 		}
@@ -419,7 +419,7 @@ func (m Model) handleInputKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if a := m.attached; a != nil {
 			m.attached = nil
 			m.status = "Uploading " + telegram.ShortName(a.name) + "..."
-			return m, m.sendImage(*m.open, *a, text, replyTo)
+			return m, m.sendMedia(*m.open, *a, text, replyTo)
 		}
 		return m, m.send(*m.open, text, replyTo)
 	}
@@ -719,10 +719,13 @@ func (m Model) View() string {
 		hint = dim.Render("Up/Down: choose  Enter: reply  Esc: cancel")
 	case m.attached != nil:
 		label := "Image " + telegram.ShortName(m.attached.name)
+		if telegram.MediaKind(m.attached.path) == "video" {
+			label = "Video " + telegram.ShortName(m.attached.name)
+		}
 		if m.replyTo != nil {
 			label += " in reply to " + senderName(*m.replyTo)
 		}
-		hint = truncate(label, m.view.Width-37) + dim.Render(" (type a caption, Esc removes image)")
+		hint = truncate(label, m.view.Width-34) + dim.Render(" (type a caption, Esc removes it)")
 	case m.replyTo != nil:
 		hint = truncate("Replying to "+senderName(*m.replyTo)+": "+oneLine(m.replyTo.Text), m.view.Width-14) + dim.Render(" (Esc cancels)")
 	}
@@ -844,7 +847,7 @@ func (m Model) send(chat telegram.Chat, text string, replyTo int) tea.Cmd {
 	}
 }
 
-// attach stages an image for the next message, replacing any staged one.
+// attach stages an image or video for the next message, replacing any staged one.
 func (m *Model) attach(a *attachment) {
 	m.detach()
 	m.attached = a
@@ -866,10 +869,10 @@ func discard(a *attachment) {
 	}
 }
 
-func (m Model) sendImage(chat telegram.Chat, a attachment, caption string, replyTo int) tea.Cmd {
+func (m Model) sendMedia(chat telegram.Chat, a attachment, caption string, replyTo int) tea.Cmd {
 	return func() tea.Msg {
 		defer discard(&a)
-		if err := m.client.SendImage(m.ctx, chat, a.path, caption, replyTo); err != nil {
+		if err := m.client.SendMedia(m.ctx, chat, a.path, caption, replyTo); err != nil {
 			return errMsg{err}
 		}
 		return sentMsg{chat}

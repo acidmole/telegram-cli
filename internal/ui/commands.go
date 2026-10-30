@@ -22,7 +22,8 @@ var commands []command
 
 func init() {
 	commands = []command{
-		{"/img", "<path> [caption]", "send an image (Ctrl+V pastes one)", runImg},
+		{"/img", "<path> [caption]", "send an image (Ctrl+V pastes one)", runMedia},
+		{"/video", "<path> [caption]", "send a video (Ctrl+V pastes its path)", runMedia},
 		{"/help", "", "show this help (also Ctrl+H)", func(m Model, _ string) (tea.Model, tea.Cmd) {
 			m.input.Reset()
 			m.openHelp()
@@ -43,10 +44,12 @@ func (m Model) runCommand(text string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func runImg(m Model, args string) (tea.Model, tea.Cmd) {
+// runMedia sends an image or video, whichever the file is; /img and /video
+// only differ in what they promise.
+func runMedia(m Model, args string) (tea.Model, tea.Cmd) {
 	path, caption, _ := strings.Cut(args, " ")
 	if path == "" {
-		m.status = "Usage: /img <path> [caption]"
+		m.status = "Usage: /img or /video <path> [caption]"
 		return m, nil
 	}
 	replyTo := 0
@@ -58,7 +61,7 @@ func runImg(m Model, args string) (tea.Model, tea.Cmd) {
 	path = expandHome(path)
 	a := attachment{path: path, name: filepath.Base(path)}
 	m.status = "Uploading " + telegram.ShortName(a.name) + "..."
-	return m, m.sendImage(*m.open, a, strings.TrimSpace(caption), replyTo)
+	return m, m.sendMedia(*m.open, a, strings.TrimSpace(caption), replyTo)
 }
 
 func (m *Model) openHelp() {
@@ -100,9 +103,9 @@ func helpText() string {
 	section("Chat", [][2]string{
 		{"Enter", "send"},
 		{"Ctrl+R", "reply to a message"},
-		{"Ctrl+V", "paste text or an image"},
+		{"Ctrl+V", "paste text, an image or a video"},
 		{"PgUp/PgDn", "scroll; PgUp at the top loads older"},
-		{"Esc", "drop image or reply, then back to the list"},
+		{"Esc", "drop attachment or reply, then back to the list"},
 	})
 	section("Anywhere", [][2]string{
 		{"Tab", "switch between list and chat"},

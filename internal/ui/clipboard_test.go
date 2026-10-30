@@ -6,11 +6,12 @@ import (
 	"testing"
 )
 
-func TestImageFile(t *testing.T) {
+func TestMediaFile(t *testing.T) {
 	dir := t.TempDir()
 	img := filepath.Join(dir, "cat.png")
+	vid := filepath.Join(dir, "clip.MP4")
 	doc := filepath.Join(dir, "notes.txt")
-	for _, p := range []string{img, doc} {
+	for _, p := range []string{img, vid, doc} {
 		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -18,6 +19,7 @@ func TestImageFile(t *testing.T) {
 
 	for text, want := range map[string]string{
 		img:                         img,
+		vid:                         vid,
 		"file://" + img + "\n":      img,
 		doc:                         "",
 		filepath.Join(dir, "x.png"): "",
@@ -25,11 +27,11 @@ func TestImageFile(t *testing.T) {
 		img + "\n" + img:            "",
 	} {
 		got := ""
-		if a := imageFile(text); a != nil {
+		if a := mediaFile(text); a != nil {
 			got = a.path
 		}
 		if got != want {
-			t.Errorf("imageFile(%q) = %q, want %q", text, got, want)
+			t.Errorf("mediaFile(%q) = %q, want %q", text, got, want)
 		}
 	}
 }
