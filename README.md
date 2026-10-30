@@ -59,6 +59,11 @@ go build -o telegram-cli .
 ./telegram-cli
 ```
 
+Or start it with `./run.sh`, which rebuilds the binary first whenever the
+code has changed, so a `git pull` never leaves you running an old build.
+It passes its arguments on (`./run.sh -no-notify`) and works from any
+directory, so you can link it onto your `PATH`.
+
 If you use [mise](https://mise.jdx.dev), `mise install` in the checkout
 fetches the Go version pinned in `mise.toml`.
 
