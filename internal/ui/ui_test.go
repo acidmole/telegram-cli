@@ -2,6 +2,7 @@ package ui
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -148,5 +149,25 @@ func TestTypingExpires(t *testing.T) {
 	m.pruneTyping(time.Now().Add(typingFor + time.Second))
 	if got := m.typingLine("c1"); got != "" {
 		t.Errorf("after expiry got %q, want nothing", got)
+	}
+}
+
+func TestPageKeysKeepTwoLines(t *testing.T) {
+	m := openModel(t, "u1")
+	model, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = model.(Model)
+	m.view.SetContent(strings.Repeat("line\n", 200))
+	m.view.GotoTop()
+	step := m.view.Height - 2
+
+	model, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	m = model.(Model)
+	if m.view.YOffset != step {
+		t.Fatalf("PgDn moved to line %d, want %d", m.view.YOffset, step)
+	}
+	model, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	model, _ = model.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	if got := model.(Model).view.YOffset; got != step {
+		t.Errorf("PgDn then PgUp moved to line %d, want %d", got, step)
 	}
 }

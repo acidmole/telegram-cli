@@ -22,6 +22,10 @@ import (
 
 const listWidth = 30
 
+// pageOverlap is how many lines of the last page PgUp/PgDn keep in view,
+// to read on from.
+const pageOverlap = 2
+
 var (
 	asciiBorder = lipgloss.Border{
 		Top: "-", Bottom: "-", Left: "|", Right: "|",
@@ -237,12 +241,16 @@ func (m Model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.focus == focusPick {
 			break
 		}
-		var cmd tea.Cmd
-		m.view, cmd = m.view.Update(k)
-		if k.String() == "pgup" && m.view.AtTop() {
-			cmd = tea.Batch(cmd, m.loadOlder())
+		step := max(m.view.Height-pageOverlap, 1)
+		if k.String() == "pgdown" {
+			m.view.ScrollDown(step)
+			return m, nil
 		}
-		return m, cmd
+		m.view.ScrollUp(step)
+		if m.view.AtTop() {
+			return m, m.loadOlder()
+		}
+		return m, nil
 	}
 
 	switch m.focus {
