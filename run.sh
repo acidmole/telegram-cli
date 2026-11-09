@@ -6,4 +6,7 @@ set -e
 # Resolve symlinks, so a link to this script on PATH still finds the checkout.
 dir=$(dirname "$(readlink -f "$0")")
 (cd "$dir" && go build -o telegram-cli .)
+# The API ID and hash, kept out of the checkout (see the README).
+env_file=${XDG_CONFIG_HOME:-$HOME/.config}/telegram-cli.env
+[ -f "$env_file" ] && . "$env_file"
 exec "$dir/telegram-cli" "$@"

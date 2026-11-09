@@ -99,8 +99,7 @@ export TG_API_HASH=0123456789abcdef0123456789abcdef
 telegram-cli
 ```
 
-To avoid typing them every time, keep them in a file only you can read and
-load it from your shell's startup file:
+To avoid typing them every time, keep them in a file only you can read:
 
 ```sh
 cat > ~/.config/telegram-cli.env <<'EOF'
@@ -108,6 +107,12 @@ export TG_API_ID=123456
 export TG_API_HASH=0123456789abcdef0123456789abcdef
 EOF
 chmod 600 ~/.config/telegram-cli.env
+```
+
+`./run.sh` loads that file by itself. To run the binary directly, load it
+from your shell's startup file as well:
+
+```sh
 echo '[ -f ~/.config/telegram-cli.env ] && . ~/.config/telegram-cli.env' >> ~/.bashrc
 ```
 
